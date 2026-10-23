@@ -1,0 +1,456 @@
+@startuml class_bank_queue_v28
+title Диаграмма классов — СМО «Электронная очередь в отделении банка»\nВариант № 28
+
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam linetype ortho
+
+package "Конфигурация и заявки" {
+  class SimulationConfig {
+    - windowCount: int
+    - bufferCapacity: int
+    - lambdaI1: double
+    - lambdaI2: double
+    - lambdaI3: double
+    - serviceMinByType: double[]
+    - serviceMaxByType: double[]
+    - operationProbabilities: double[]
+    - totalRequests: int
+    --
+    + getWindowCount(): int
+    + getBufferCapacity(): int
+    + getServiceMin(type: BankOperationType): double
+    + getServiceMax(type: BankOperationType): double
+    + getOperationProbabilities(): double[]
+    + getTotalRequests(): int
+  }
+
+  enum ClientCategory {
+    I1_VIP
+    I2_PREMIUM
+    I3_REGULAR
+  }
+  note bottom of ClientCategory
+    Приоритет: I1 (VIP) > I2 (премиум) > I3 (обычные).
+    Меньший номер источника означает больший приоритет.
+  end note
+
+  enum BankOperationType {
+    DEPOSIT
+    CREDIT
+    CONSULTATION
+    LEGAL_ENTITY
+    OTHER
+  }
+
+  enum RequestStatus {
+    CREATED
+    QUEUED
+    SERVING
+    SERVED
+    REJECTED
+  }
+
+  class QueueRequest {
+    - requestId: long
+    - sourceId: int
+    - sourceSeqNo: int
+    - category: ClientCategory
+    - operationType: BankOperationType
+    - createdAt: double
+    - queuedAt: double
+    - serviceStartAt: double
+    - serviceEndAt: double
+    - exitAt: double
+    - status: RequestStatus
+    --
+    .. меньший sourceId означает более высокий приоритет ..
+    + priority(): int
+    + label(): String
+    + markQueued(t: double): void
+    + markRejected(t: double): void
+    + markServing(start: double, end: double): void
+    + markServed(t: double): void
+    + waitingTime(): double
+    + serviceTime(): double
+    + sojournTime(): double
+    + getStatus(): RequestStatus
+    + getSourceId(): int
+    + getOperationType(): BankOperationType
+  }
+
+  class OperationMix {
+    - config: SimulationConfig
+    - probabilities: double[]
+    + sample(): BankOperationType
+  }
+  note bottom of OperationMix
+    Распределение типов банковских операций задаётся конфигурацией.
+    Если для операций нет отдельных интервалов, используется общий
+    примерный интервал обслуживания [5, 15] минут.
+  end note
+}
+
+package "Источники, буфер и окна" {
+  class ClientSource <<ИБ, ИЗ1>> {
+    - id: int
+    - category: ClientCategory
+    - lambda: double
+    - requestCounter: int
+    --
+    + nextInterval(): double
+    + buildRequest(now: double, operationType: BankOperationType): QueueRequest
+    + getId(): int
+  }
+  note bottom of ClientSource
+    ИБ: источник бесконечный.
+    ИЗ1: интервалы между приходами экспоненциальные:
+    dt = -ln(1 - U) / lambda, U ~ U(0, 1).
+    Источники I1, I2, I3 моделируются независимо.
+  end note
+
+  class WaitingBuffer {
+    - slots: QueueRequest[]
+    - capacity: int
+    --
+    + capacity(): int
+    + occupiedCount(): int
+    + isFull(): boolean
+    + isEmpty(): boolean
+    + firstFreeSlot(): int
+    + oldestRequestSlot(): int
+    + put(slot: int, req: QueueRequest): void
+    + takeOut(slot: int): QueueRequest
+    + slotOf(req: QueueRequest): int
+    + snapshot(): QueueRequest[]
+  }
+  note bottom of WaitingBuffer
+    Места в зале фиксированы.
+    При извлечении клиента остальные заявки
+    не сдвигаются; поиск свободного места идёт
+    от начала буфера.
+  end note
+
+  class ServiceWindow <<П32>> {
+    - id: int
+    - config: SimulationConfig
+    - currentRequest: QueueRequest
+    - busyTotal: double
+    --
+    + isIdle(): boolean
+    + startService(req: QueueRequest, now: double): double
+    + finishService(now: double): QueueRequest
+    + getId(): int
+    + getBusyTotal(): double
+    - sampleServiceTime(req: QueueRequest): double
+  }
+  note bottom of ServiceWindow
+    П32: для типа операции выбирается заданный
+    интервал [a_type, b_type], затем T = a_type + U *
+    (b_type - a_type), U ~ U(0, 1).
+    Примерный интервал: [5, 15] минут.
+  end note
+}
+
+package "Дисциплины и диспетчеры" {
+  interface AdmissionPolicy <<Д1>> {
+    + findSlot(buffer: WaitingBuffer): int
+  }
+  class FirstFreeSeatPolicy <<Д1033>> {
+    + findSlot(buffer: WaitingBuffer): int
+  }
+  note bottom of FirstFreeSeatPolicy
+    Д1033: новое ожидание занимает первое
+    свободное место; перестановки заявок нет.
+  end note
+
+  interface OverflowPolicy <<Д1О>> {
+    + findVictim(buffer: WaitingBuffer): QueueRequest
+  }
+  class OldestWaitingReplacementPolicy <<Д1003>> {
+    + findVictim(buffer: WaitingBuffer): QueueRequest
+  }
+  note bottom of OldestWaitingReplacementPolicy
+    Д1003: при полном буфере из очереди удаляется
+    заявка с минимальным временем создания.
+    Новая заявка занимает освободившееся место.
+    Заявки, уже находящиеся у операторов,
+    вытеснять нельзя.
+  end note
+
+  class PlacementDispatcher <<ДП>> {
+    - buffer: WaitingBuffer
+    - admission: AdmissionPolicy
+    - overflow: OverflowPolicy
+    - stats: StatsCollector
+    - journal: EventJournal
+    --
+    + placeRequest(req: QueueRequest, now: double): void
+  }
+
+  interface RequestSelectionPolicy <<Д2Б>> {
+    + next(buffer: WaitingBuffer): QueueRequest
+    + currentPackage(): QueueRequest[]
+  }
+  class PriorityPackagePolicy <<Д2Б5>> {
+    - packageQueue: Deque<QueueRequest>
+    --
+    + next(buffer: WaitingBuffer): QueueRequest
+    + currentPackage(): QueueRequest[]
+    - createPackage(buffer: WaitingBuffer): void
+    - skipInvalidEntries(buffer: WaitingBuffer): void
+  }
+  note bottom of PriorityPackagePolicy
+    Д2Б5: формируется пакет заявок одного источника
+    с наивысшим приоритетом среди ожидающих:
+    I1, затем I2, затем I3. Внутри пакета — FIFO.
+    Пакет является снимком буфера на момент формирования;
+    новые заявки в текущий пакет не добавляются.
+    Выбитые заявки из пакета пропускаются.
+  end note
+
+  interface DevicePolicy <<Д2П>> {
+    + hasIdle(windows: ServiceWindow[]): boolean
+    + pickWindow(windows: ServiceWindow[]): int
+    + pointer(): int
+  }
+  class RingWindowPolicy <<Д2П2>> {
+    - ptr: int
+    --
+    + hasIdle(windows: ServiceWindow[]): boolean
+    + pickWindow(windows: ServiceWindow[]): int
+    + pointer(): int
+  }
+  note bottom of RingWindowPolicy
+    Д2П2: выбор первого свободного окна
+    по кольцу от указателя ptr.
+    После выбора i: ptr := (i + 1) mod m.
+  end note
+
+  class SelectionDispatcher <<ДВ>> {
+    - buffer: WaitingBuffer
+    - windows: ServiceWindow[]
+    - calendar: EventCalendar
+    - requestPolicy: RequestSelectionPolicy
+    - devicePolicy: DevicePolicy
+    - journal: EventJournal
+    --
+    + onBufferChanged(now: double): void
+    + onWindowFreed(now: double): void
+    + dispatch(now: double): void
+  }
+}
+
+package "События и ядро моделирования" {
+  enum EventKind {
+    ARRIVAL
+    SERVICE_FINISHED
+  }
+
+  class TimedEvent {
+    - time: double
+    - kind: EventKind
+    - sourceId: int
+    - windowId: int
+    --
+    + getTime(): double
+    + getKind(): EventKind
+    + getSourceId(): int
+    + getWindowId(): int
+  }
+
+  class EventCalendar {
+    - events: PriorityQueue<TimedEvent>
+    --
+    + push(event: TimedEvent): void
+    + pop(): TimedEvent
+    + isEmpty(): boolean
+    + removeAll(kind: EventKind): void
+    + snapshot(): TimedEvent[]
+  }
+
+  class Simulation {
+    - config: SimulationConfig
+    - sources: ClientSource[]
+    - operationMix: OperationMix
+    - buffer: WaitingBuffer
+    - windows: ServiceWindow[]
+    - calendar: EventCalendar
+    - placement: PlacementDispatcher
+    - selection: SelectionDispatcher
+    - stats: StatsCollector
+    - journal: EventJournal
+    - now: double
+    - generated: int
+    --
+    + initialize(): void
+    + step(): StepSnapshot
+    + runAuto(): ResultTable
+    + isFinished(): boolean
+    + currentTime(): double
+    - onArrival(event: TimedEvent): void
+    - onServiceFinished(event: TimedEvent): void
+  }
+}
+
+package "Статистика и отображение" {
+  class StatsCollector {
+    - perSource: SourceStat[]
+    - deviceBusyTime: double[]
+    --
+    + onGenerated(req: QueueRequest): void
+    + onRejected(req: QueueRequest, now: double): void
+    + onServed(req: QueueRequest, windowId: int): void
+    + buildTable(windows: ServiceWindow[], totalTime: double): ResultTable
+  }
+
+  class SourceStat {
+    - sourceId: int
+    - generated: int
+    - served: int
+    - rejected: int
+    - waitSamples: int
+    - waitSum: double
+    - waitSqSum: double
+    - serviceSamples: int
+    - serviceSum: double
+    - serviceSqSum: double
+    - sojournSamples: int
+    - sojournSum: double
+    - sojournSqSum: double
+    --
+    + rejectProbability(): double
+    + meanWait(): double
+    + meanService(): double
+    + meanSojourn(): double
+    + varianceWait(): double
+    + varianceService(): double
+    + varianceSojourn(): double
+  }
+
+  class ResultTable <<ОР1>> {
+    - sourceRows: SourceStat[]
+    - windowUtilization: double[]
+    + print(): void
+  }
+
+  class StepSnapshot <<ОД1>> {
+    + time: double
+    + event: TimedEvent
+    + calendar: TimedEvent[]
+    + buffer: QueueRequest[]
+    + windowStates: String[]
+    + windowPointer: int
+    + currentPackage: QueueRequest[]
+    + generatedBySource: int[]
+    + rejectedBySource: int[]
+  }
+
+  class EventJournal {
+    - entries: JournalEntry[]
+    + log(kind: JournalKind, req: QueueRequest, time: double): void
+    + snapshot(): JournalEntry[]
+  }
+
+  class JournalEntry {
+    - time: double
+    - kind: JournalKind
+    - request: QueueRequest
+  }
+
+  enum JournalKind {
+    GENERATED
+    BUFFERED
+    REJECTED_OLDEST
+    SELECTED_FROM_PACKAGE
+    SENT_TO_WINDOW
+    SERVED
+  }
+
+  class ModelApp {
+    - simulation: Simulation
+    - stepRenderer: StepRenderer
+    - resultPrinter: ResultPrinter
+    + runStepMode(): void
+    + runAutoMode(): void
+  }
+  class StepRenderer <<ОД1>> {
+    + render(snapshot: StepSnapshot): void
+  }
+  class ResultPrinter <<ОР1>> {
+    + print(table: ResultTable): void
+  }
+}
+
+ClientSource --> ClientCategory
+QueueRequest --> ClientCategory
+QueueRequest --> BankOperationType
+Simulation --> OperationMix
+SimulationConfig --> BankOperationType
+ServiceWindow --> SimulationConfig
+QueueRequest --> RequestStatus
+ClientSource ..> QueueRequest : создаёт
+WaitingBuffer o-- "0..*" QueueRequest
+ServiceWindow --> "0..1" QueueRequest : обслуживает
+
+Simulation --> SimulationConfig
+Simulation o-- "3" ClientSource
+Simulation o-- "1..*" ServiceWindow
+Simulation *-- WaitingBuffer
+Simulation *-- EventCalendar
+Simulation *-- PlacementDispatcher
+Simulation *-- SelectionDispatcher
+Simulation *-- StatsCollector
+Simulation *-- EventJournal
+
+AdmissionPolicy <|.. FirstFreeSeatPolicy
+OverflowPolicy <|.. OldestWaitingReplacementPolicy
+RequestSelectionPolicy <|.. PriorityPackagePolicy
+DevicePolicy <|.. RingWindowPolicy
+
+PlacementDispatcher --> WaitingBuffer
+PlacementDispatcher --> AdmissionPolicy
+PlacementDispatcher --> OverflowPolicy
+PlacementDispatcher --> StatsCollector
+PlacementDispatcher --> EventJournal
+SelectionDispatcher --> WaitingBuffer
+SelectionDispatcher --> ServiceWindow
+SelectionDispatcher --> EventCalendar
+SelectionDispatcher --> RequestSelectionPolicy
+SelectionDispatcher --> DevicePolicy
+SelectionDispatcher --> EventJournal
+
+EventCalendar o-- "0..*" TimedEvent
+TimedEvent --> EventKind
+EventJournal o-- "0..*" JournalEntry
+JournalEntry --> JournalKind
+StatsCollector *-- "3" SourceStat
+StatsCollector ..> ResultTable : формирует
+Simulation ..> StepSnapshot : возвращает из step()
+ModelApp --> Simulation
+ModelApp --> StepRenderer
+ModelApp --> ResultPrinter
+StepRenderer --> StepSnapshot
+StepRenderer --> EventCalendar
+StepRenderer --> WaitingBuffer
+StepRenderer --> ServiceWindow
+StepRenderer --> EventJournal
+StepRenderer --> StatsCollector
+ResultPrinter ..> ResultTable
+
+note top of Simulation
+  ARRIVAL: генерация заявки -> статистика -> постановка/замена в буфере -> dispatch.
+  SERVICE_FINISHED: завершение обслуживания -> статистика -> dispatch.
+  Новые ARRIVAL прекращаются после генерации totalRequests заявок;
+  затем модель обслуживает заявки, оставшиеся в системе.
+end note
+
+note bottom of SourceStat
+  Средние и дисперсии считаются по наблюдаемым завершённым выходам.
+  Для ожидания и времени в системе учитываются как обслуженные,
+  так и вытесненные клиенты; время обслуживания — только обслуженные.
+  Дисперсия: E[X^2] - (E[X])^2.
+end note
+
+@enduml
