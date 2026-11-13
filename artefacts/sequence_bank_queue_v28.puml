@@ -1,156 +1,168 @@
 @startuml sequence_bank_queue_v28
-title Сиквенс — СМО «Электронная очередь в отделении банка» (вариант № 28)
-autonumber
+title Диаграмма последовательности — Электронная очередь банка\nВариант № 28
+
+scale max 3500 width
 
 skinparam shadowing false
-skinparam responseMessageBelowArrow true
-skinparam maxMessageSize 180
-skinparam ParticipantPadding 12
+skinparam ParticipantPadding 15
+skinparam BoxPadding 10
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 100
 
-participant "Ядро\n(Simulation)" as Core
-participant "Календарь\nсобытий" as Cal
-participant "Источники\nИ1 / И2 / И3\n(ИБ, ИЗ1)" as Src
-participant "Распределение типов\nопераций" as Mix
-participant "Диспетчер\nпостановки (ДП)" as PD
-participant "Политика\nместа (Д1033)" as AP
-participant "Политика\nпереполнения\n(Д1003)" as RP
-database "Буфер\n(места ожидания)" as Buf
-participant "Диспетчер\nвыбора (ДВ)" as SD
-participant "Политика\nвыбора заявки\n(Д2Б5)" as SP
-participant "Политика\nвыбора окна\n(Д2П2)" as WP
-participant "Окно\nоперациониста (П32)" as Win
-participant "Статистика\n(ОР1)" as St
-participant "Журнал и снимок\nсостояния (ОД1)" as View
+actor "Клиент" as Client
+participant "Диспетчер\nэлектронной очереди" as D
+queue "Буфер ожидания\n(B мест)" as Q
+participant "Окно 1" as W1
+participant "Окно 2" as W2
+participant "Окно 3" as W3
 
-note over Core, View
-Вариант № 28: ИБ ИЗ1 П32 Д1033 Д1003 Д2П2 Д2Б5 ОР1 ОД1.
-ИЗ1: интервалы прихода — экспоненциальные, dt = -ln(1-U)/lambda.
-П32: обслуживание — равномерное на интервале [a_type, b_type]; [5, 15] минут — пример.
-Приоритет источников: И1 (VIP) > И2 (Премиум) > И3 (обычные).
-Буфер хранит только ожидающих клиентов. Клиентов у окон не вытесняют.
+note over Client,W3
+Источники:
+И1 — VIP, высший приоритет
+И2 — Премиум, средний приоритет
+И3 — обычные, низший приоритет
+
+Все три окна могут обслуживать клиентов одновременно.
 end note
 
-== Инициализация ==
-loop для источников И1, И2 и И3
-  Core -> Src : nextInterval(sourceId)
-  Src --> Core : dt ~ Exp(lambda_i) (ИЗ1)
-  Core -> Cal : push(ARRIVAL(sourceId, dt))
+== Поступление заявок ==
+
+loop Поступление очередных клиентов
+
+    Client -> D : ARRIVAL(category, operationType)
+
+    D -> D : Создать талон\ncreatedAt := now
+
+    D -> Q : Найти первое свободное место\n(Д1033)
+    Q --> D : Свободный слот / Буфер заполнен
+
+    alt Есть свободное место
+
+        D -> Q : Поместить заявку в слот
+        D -> D : queuedAt := now
+        Q --> D : Заявка добавлена
+
+    else Буфер заполнен
+
+        D -> Q : Найти заявку с минимальным queuedAt\n(Д1003)
+        Q --> D : Старая заявка и номер её слота
+
+        D -> Q : Удалить старую заявку
+        D -> D : Учесть отказ старой заявки
+
+        D -> Q : Поместить новую заявку\nв освободившийся слот
+        D -> D : queuedAt := now
+        Q --> D : Заявка добавлена
+
+    end
+
 end
 
-== Основной цикл событий ==
-loop пока календарь событий не пуст
-  Core -> Cal : pop()
-  Cal --> Core : event с минимальным временем
-  Core -> Core : now := event.time
+== Распределение по окнам ==
 
-  alt event.kind = ARRIVAL — пришёл клиент
-    Core -> Mix : sampleType()
-    Mix --> Core : operationType (по настроенному составу операций)
-    Core -> Src : buildRequest(sourceId, operationType, now)
-    Src --> Core : req (категория, тип операции, номер, время прихода)
-    Core -> St : onGenerated(req)
-    Core -> View : log(GENERATED, req, now)
-    Core -> Core : generated := generated + 1
+loop Пока есть свободные окна и заявки в буфере
 
-    alt generated < totalRequests
-      Core -> Src : nextInterval(sourceId)
-      Src --> Core : dt ~ Exp(lambda_i)
-      Core -> Cal : push(ARRIVAL(sourceId, now + dt))
-    else достигнут лимит генерации
-      Core -> Cal : removeAll(ARRIVAL)
-      note right of Cal
-        Источники логически бесконечны,
-        но конкретная реализация ограничена
-        totalRequests для завершения эксперимента.
-      end note
+    D -> Q : Выбрать пакет заявок\nпо приоритету (Д2Б5)
+
+    Q --> D : Следующая заявка\nИ1 > И2 > И3, FIFO по queuedAt
+
+    D -> D : Выбрать свободное окно\nпо кольцу (Д2П2)
+
+    alt Выбрано окно 1
+
+        D -> W1 : Передать заявку на обслуживание
+        activate W1
+        note right of W1
+          Время обслуживания:
+          T ~ U(a_type, b_type)
+          (П32)
+        end note
+
+    else Выбрано окно 2
+
+        D -> W2 : Передать заявку на обслуживание
+        activate W2
+        note right of W2
+          Время обслуживания:
+          T ~ U(a_type, b_type)
+          (П32)
+        end note
+
+    else Выбрано окно 3
+
+        D -> W3 : Передать заявку на обслуживание
+        activate W3
+        note right of W3
+          Время обслуживания:
+          T ~ U(a_type, b_type)
+          (П32)
+        end note
+
     end
 
-    Core -> PD : placeRequest(req, now)
-    PD -> AP : findSlot(Buf)
-    AP -> Buf : firstFreeSlot()
-    Buf --> AP : slot либо NONE
-    AP --> PD : slot либо NONE
+    D -> D : ptr := (windowId + 1) mod m
 
-    alt найдено свободное место — Д1033
-      PD -> Buf : put(slot, req)
-      PD -> PD : req.markQueued(now)
-      PD -> View : log(BUFFERED, req, now)
-    else буфер полон — Д1003
-      PD -> RP : findVictim(Buf)
-      RP -> Buf : oldestRequestSlot()
-      Buf --> RP : slot самой старой ожидающей заявки
-      RP --> PD : victim = заявка с минимальным createdAt
-      PD -> Buf : takeOut(slotOf(victim))
-      Buf --> PD : victim
-      PD -> PD : victim.markRejected(now)
-      PD -> St : onRejected(victim, now)
-      PD -> View : log(REJECTED_OLDEST, victim, now)
-      PD -> Buf : put(освободившийся slot, req)
-      PD -> PD : req.markQueued(now)
-      PD -> View : log(BUFFERED, req, now)
-      note right of PD
-        Вытесняется именно ожидающий клиент,
-        который дольше всех находится в буфере.
-        Новая заявка занимает его место.
-        Обслуживаемые клиенты не рассматриваются.
-      end note
-    end
-
-  else event.kind = SERVICE_FINISHED — окно освободилось
-    Core -> Win : finishService(now)
-    Win -> Win : req.markServed(now)
-    Win --> Core : servedRequest
-    Core -> St : onServed(servedRequest, windowId)
-    Core -> View : log(SERVED, servedRequest, now)
-  end
-
-  Core -> SD : dispatch(now)
-  note right of SD
-    ДВ вызывается после каждого прихода
-    и после каждого освобождения окна.
-    Пока есть свободное окно и ожидающие,
-    система передаёт клиентов на обслуживание.
-  end note
-
-  loop пока буфер не пуст и есть свободное окно
-    SD -> WP : pickWindow(windows) — Д2П2
-    WP -> Win : isIdle() по кольцу от ptr
-    Win --> WP : первое свободное окно d
-    WP -> WP : ptr := (d + 1) mod m
-    WP --> SD : d
-
-    SD -> SP : next(Buf) — Д2Б5
-    opt текущий пакет исчерпан или пуст
-      SP -> Buf : snapshot()
-      Buf --> SP : ожидающие заявки
-      SP -> SP : выбрать минимальный sourceId
-      SP -> SP : сформировать пакет этого источника, FIFO по createdAt
-    end
-    SP -> SP : пропустить заявки, уже вытесненные из буфера
-    SP --> SD : req с наивысшим приоритетом в пакете
-
-    SD -> Buf : takeOut(slotOf(req))
-    Buf --> SD : req
-    SD -> Win : startService(req, now)
-    Win -> Win : req.markServing(now, endAt)
-    Win -> Win : duration := a_type + U * (b_type - a_type) (П32)
-    note right of Win
-      Для операции выбирается свой интервал обслуживания.
-      Пример: a_type = 5, b_type = 15 минут.
-    end note
-    Win --> SD : endAt = now + duration
-    SD -> Cal : push(SERVICE_FINISHED(d, endAt))
-    SD -> View : log(SENT_TO_WINDOW, req, now)
-  end
-
-  opt включён пошаговый режим ОД1
-    Core -> View : render(now, calendar, buffer, windows, package, stats)
-    View --> Core : снимок состояния после события
-  end
 end
 
-Core -> St : buildTable(windows, totalTime)
-St --> Core : результаты по И1, И2, И3 и окнам
-Core -> View : вывести итоговую сводку ОР1
+== Завершение обслуживания ==
+
+par Завершение в окне 1
+
+    W1 --> D : SERVICE_FINISHED
+    deactivate W1
+
+else Завершение в окне 2
+
+    W2 --> D : SERVICE_FINISHED
+    deactivate W2
+
+else Завершение в окне 3
+
+    W3 --> D : SERVICE_FINISHED
+    deactivate W3
+
+end
+
+== Повторное распределение ==
+
+loop При освобождении окна, если буфер не пуст
+
+    D -> Q : Выбрать следующую заявку\nпо Д2Б5
+    Q --> D : Заявка с высшим приоритетом
+
+    D -> D : Найти свободное окно\nпо кольцу Д2П2
+
+    alt Свободно окно 1
+
+        D -> W1 : Начать обслуживание
+        activate W1
+
+    else Свободно окно 2
+
+        D -> W2 : Начать обслуживание
+        activate W2
+
+    else Свободно окно 3
+
+        D -> W3 : Начать обслуживание
+        activate W3
+
+    end
+
+end
+
+note over D
+Автоматический подбор количества заявок:
+N0 = 100
+Nnext = ceil(t_gamma^2 * (1-p) / (epsilon^2 * p))
+
+epsilon = 0.10
+gamma = 0.90
+
+Критерий остановки:
+|p_prev - p| < 0.1 * p_prev
+
+Подбор N выполняется внешним циклом эксперимента.
+end note
 
 @enduml
